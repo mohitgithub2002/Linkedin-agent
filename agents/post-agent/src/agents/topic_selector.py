@@ -26,24 +26,48 @@ class TopicBrief(BaseModel):
     brief: Brief = Field(description="A structured brief for the post")
 
 class TopicSelectorAgent(BaseAgent):
-    """Agent responsible for selecting and briefing topics for LinkedIn posts."""
+    """Agent responsible for selecting topics for LinkedIn posts."""
     
     def __init__(self):
         super().__init__("topic_selector")
         self.parser = JsonOutputParser(pydantic_object=TopicBrief)
         
-    def create_prompt(self) -> ChatPromptTemplate:
-        return ChatPromptTemplate.from_messages([
-            ("system", """You are a professional LinkedIn content strategist. Your task is to:
-            1. Analyze current trends and audience interests
-            2. Select an engaging topic for a LinkedIn post
-            3. Create a detailed brief that outlines the post structure
+    def create_prompt(self, with_topic: bool = False) -> ChatPromptTemplate:
+        if with_topic:
+            system_message = """You are a professional LinkedIn content strategist. Your task is to:
+            1. Create a detailed brief for a LinkedIn post on the given topic
+            2. Identify the target audience
+            3. Outline key points to cover
+            4. Suggest an appropriate tone
+            5. Recommend relevant hashtags
             
-            Consider:
-            - Industry relevance
-            - Audience engagement potential
-            - Current trends and news
-            - Professional value
+            Format your response as a JSON object with the following structure:
+            {{
+                "current_topic": "{topic}",
+                "brief": {{
+                    "title": "The title of the post",
+                    "target_audience": "Who this post is for",
+                    "key_points": [
+                        {{
+                            "heading": "Key point heading",
+                            "content": "Detailed content for this point",
+                            "optional_visual": "Optional visual suggestion",
+                            "call_to_action": "Optional call to action"
+                        }}
+                    ],
+                    "tone": "The tone to use in the post",
+                    "hashtags": ["#relevant", "#hashtags"]
+                }}
+            }}"""
+            human_message = "Create a detailed brief for a LinkedIn post on: {topic}"
+        else:
+            system_message = """You are a professional LinkedIn content strategist. Your task is to:
+            1. Select an engaging topic for a LinkedIn post
+            2. Create a detailed brief for the post
+            3. Identify the target audience
+            4. Outline key points to cover
+            5. Suggest an appropriate tone
+            6. Recommend relevant hashtags
             
             Format your response as a JSON object with the following structure:
             {{
@@ -62,8 +86,12 @@ class TopicSelectorAgent(BaseAgent):
                     "tone": "The tone to use in the post",
                     "hashtags": ["#relevant", "#hashtags"]
                 }}
-            }}"""),
-            ("human", "{input}")
+            }}"""
+            human_message = "{input}"
+            
+        return ChatPromptTemplate.from_messages([
+            ("system", system_message),
+            ("human", human_message)
         ])
     
     async def run(self, state: AgentState) -> AgentState:
@@ -77,12 +105,23 @@ class TopicSelectorAgent(BaseAgent):
             logger.debug(f"Converted State Type: {type(state)}")
             logger.debug(f"Converted State Content: {state}")
             
-        prompt = self.create_prompt()
-        chain = prompt | self.llm | self.parser
-        
-        # Get topic and brief
-        result = await chain.ainvoke({"input": "Select a topic for a LinkedIn post"})
-        logger.debug(f"Topic Selection Result: {result}")
+        # Check if a topic is already provided
+        if state.current_topic:
+            logger.info(f"Using provided topic: {state.current_topic}")
+            prompt = self.create_prompt(with_topic=True)
+            chain = prompt | self.llm | self.parser
+            
+            # Create a brief for the provided topic
+            result = await chain.ainvoke({"topic": state.current_topic})
+            logger.debug(f"Topic Brief Result: {result}")
+        else:
+            logger.info("No topic provided, selecting a new topic")
+            prompt = self.create_prompt(with_topic=False)
+            chain = prompt | self.llm | self.parser
+            
+            # Select a new topic and create a brief
+            result = await chain.ainvoke({"input": "Select a topic for a LinkedIn post"})
+            logger.debug(f"Topic Selection Result: {result}")
         
         # Convert result to TopicBrief if it's a dictionary
         if isinstance(result, dict):
