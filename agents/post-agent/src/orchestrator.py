@@ -14,6 +14,10 @@ import os
 from dotenv import load_dotenv
 import logging
 import sys
+import asyncio
+from langsmith import Client
+from langchain.callbacks.tracers.langchain import wait_for_all_tracers
+import uuid
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +28,58 @@ load_dotenv()
 
 # Set Python recursion limit to avoid hitting the limit in workflow execution
 sys.setrecursionlimit(100)  # Increase from default to handle potential deep recursion
+
+# Initialize LangSmith client
+langsmith_api_key = os.getenv("LANGSMITH_API_KEY")
+langsmith_project = os.getenv("LANGSMITH_PROJECT", "linkedin-post-generation")
+langchain_endpoint = os.getenv("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com")
+langchain_api_key = os.getenv("LANGCHAIN_API_KEY")
+
+# Use the same API key for both if only one is provided
+if langchain_api_key and not langsmith_api_key:
+    langsmith_api_key = langchain_api_key
+elif langsmith_api_key and not langchain_api_key:
+    langchain_api_key = langsmith_api_key
+
+# Initialize LangSmith client if credentials are available
+langsmith_client = None
+langsmith_tracing_enabled = False
+
+if langsmith_api_key:
+    try:
+        langsmith_client = Client(
+            api_key=langsmith_api_key,
+            api_url=langchain_endpoint
+        )
+        # Set environment variables for LangChain tracing
+        os.environ["LANGCHAIN_TRACING_V2"] = "true"
+        os.environ["LANGCHAIN_PROJECT"] = langsmith_project
+        os.environ["LANGCHAIN_API_KEY"] = langchain_api_key
+        langsmith_tracing_enabled = True
+        logger.info(f"LangSmith client initialized with project: {langsmith_project}")
+    except Exception as e:
+        logger.warning(f"Failed to initialize LangSmith client: {str(e)}")
+else:
+    logger.warning("LANGSMITH_API_KEY not found. LangSmith tracing will be disabled.")
+
+# Safe version of wait_for_all_tracers that handles the case when tracing is disabled
+async def safe_wait_for_tracers():
+    """Safely wait for all tracers to complete, handling the case when tracing is disabled."""
+    if not langsmith_tracing_enabled:
+        logger.debug("LangSmith tracing is disabled, skipping wait_for_all_tracers")
+        return
+        
+    try:
+        # Only call wait_for_all_tracers if tracing is enabled
+        await wait_for_all_tracers()
+        logger.debug("Successfully waited for all tracers")
+    except TypeError as e:
+        if "NoneType" in str(e):
+            logger.debug("No active tracers to wait for")
+        else:
+            logger.warning(f"Error waiting for tracers: {str(e)}")
+    except Exception as e:
+        logger.warning(f"Unexpected error waiting for tracers: {str(e)}")
 
 def create_workflow(llm: Optional[BaseChatModel] = None) -> StateGraph:
     """Create the main workflow graph for post generation."""
@@ -94,7 +150,7 @@ def create_workflow(llm: Optional[BaseChatModel] = None) -> StateGraph:
     workflow.set_entry_point("select_topic")
     logger.info("Set entry point to 'select_topic'")
     
-    # Compile the workflow - remove unsupported parameters
+    # Compile the workflow
     compiled_workflow = workflow.compile()
     
     logger.info("Workflow compiled successfully")
@@ -114,11 +170,54 @@ async def generate_post(topic: Optional[str] = None) -> Dict[str, Any]:
             initial_state.current_topic = topic
             logger.info(f"Initialized state with topic: {topic}")
         
+        # Setup config for tracing
+        config = {}
+        
+        # Set up LangSmith tracing if available
+        if langsmith_tracing_enabled:
+            run_id = str(uuid.uuid4())
+            logger.info(f"LangSmith run ID: {run_id}")
+            
+            # Track metadata about the run
+            metadata = {
+                "topic": topic or "auto-selected",
+                "workflow_type": "linkedin_post_generation",
+                "version": "v1.3.24"
+            }
+            
+            # Add additional metadata for better tracking
+            if topic:
+                metadata["topic_provided"] = "true"
+            else:
+                metadata["topic_provided"] = "false"
+                
+            # Add run configuration
+            config = {
+                "run_name": f"LinkedIn Post Generation - {topic or 'Auto Topic'}",
+                "metadata": metadata
+            }
+                
         # Execute workflow
         logger.info("Executing workflow")
-        result = await workflow.ainvoke(initial_state)
+        
+        # Execute with tracing if enabled
+        try:
+            # Include config only if we have LangSmith enabled
+            if langsmith_tracing_enabled:
+                result = await workflow.ainvoke(initial_state, config=config)
+                await safe_wait_for_tracers()
+                logger.info("LangSmith tracing complete")
+            else:
+                # Execute without tracing config if LangSmith is not enabled
+                result = await workflow.ainvoke(initial_state)
+        except Exception as e:
+            logger.error(f"Workflow execution failed: {str(e)}")
+            if langsmith_tracing_enabled:
+                await safe_wait_for_tracers()
+                logger.info("LangSmith tracing complete despite error")
+            raise
+            
         logger.debug(f"Workflow execution complete. Result type: {type(result)}")
-        logger.debug(f"Result content: {result}")
         
         # Convert AddableValuesDict to a regular dict and access state keys
         # In LangGraph, the result is an AddableValuesDict, not an AgentState
@@ -134,4 +233,11 @@ async def generate_post(topic: Optional[str] = None) -> Dict[str, Any]:
         return result_dict["post_payload"]
     except Exception as e:
         logger.error(f"Error in workflow execution: {str(e)}", exc_info=True)
-        raise ValueError(f"Error generating post: {str(e)}") 
+        raise ValueError(f"Error generating post: {str(e)}")
+    finally:
+        # Ensure all traces are completed
+        if langsmith_tracing_enabled:
+            try:
+                await safe_wait_for_tracers()
+            except Exception as e:
+                logger.warning(f"Error in finally block waiting for tracers: {str(e)}") 
