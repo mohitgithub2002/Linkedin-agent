@@ -61,6 +61,9 @@ class QAAgent(BaseAgent):
             logger.debug(f"Converted State Type: {type(state)}")
             logger.debug(f"Converted State Content: {state}")
             
+        # Save initial checkpoint
+        self.save_checkpoint(state)
+            
         if not state.current_topic:
             logger.error("No topic found in state")
             raise ValueError("No topic available for QA review")
@@ -103,6 +106,9 @@ class QAAgent(BaseAgent):
             "role": "assistant",
             "content": f"QA Review:\nScore: {result.score}/10\nFeedback: {result.feedback}\nSuggestions: {', '.join(result.suggestions)}\nIssues: {', '.join(result.issues)}"
         })
+        
+        # Save final checkpoint
+        self.save_checkpoint(state)
         
         logger.debug(f"QA Agent - Output State Type: {type(state)}")
         logger.debug(f"QA Agent - Output State Content: {state}")

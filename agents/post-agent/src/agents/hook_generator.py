@@ -53,6 +53,9 @@ class HookGeneratorAgent(BaseAgent):
             logger.debug(f"Converted State Type: {type(state)}")
             logger.debug(f"Converted State Content: {state}")
             
+        # Save initial checkpoint
+        self.save_checkpoint(state)
+            
         if not state.current_topic:
             logger.error("No topic found in state")
             raise ValueError("No topic selected for hook generation")
@@ -74,6 +77,9 @@ class HookGeneratorAgent(BaseAgent):
             "role": "assistant",
             "content": f"Generated hook: {result.hook_text}\nTone: {result.tone}\nTarget Audience: {result.target_audience}"
         })
+        
+        # Save final checkpoint
+        self.save_checkpoint(state)
         
         logger.debug(f"Hook Generator - Output State Type: {type(state)}")
         logger.debug(f"Hook Generator - Output State Content: {state}")

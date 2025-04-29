@@ -5,6 +5,8 @@ from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
 from langgraph.graph import Graph, StateGraph
 import logging
+import re
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +107,9 @@ class TopicSelectorAgent(BaseAgent):
             logger.debug(f"Converted State Type: {type(state)}")
             logger.debug(f"Converted State Content: {state}")
             
+        # Save initial checkpoint
+        self.save_checkpoint(state)
+            
         # Check if a topic is already provided
         if state.current_topic:
             logger.info(f"Using provided topic: {state.current_topic}")
@@ -123,6 +128,13 @@ class TopicSelectorAgent(BaseAgent):
             result = await chain.ainvoke({"input": "Select a topic for a LinkedIn post"})
             logger.debug(f"Topic Selection Result: {result}")
         
+        # Handle markdown code blocks in the output
+        if isinstance(result, str):
+            # Remove markdown code block markers
+            result = re.sub(r'```json\n?|\n?```', '', result)
+            # Parse the cleaned JSON
+            result = json.loads(result)
+        
         # Convert result to TopicBrief if it's a dictionary
         if isinstance(result, dict):
             result = TopicBrief(**result)
@@ -133,6 +145,9 @@ class TopicSelectorAgent(BaseAgent):
             "role": "assistant",
             "content": f"Selected topic: {result.current_topic}\nBrief: {result.brief.model_dump_json()}"
         })
+        
+        # Save final checkpoint
+        self.save_checkpoint(state)
         
         logger.debug(f"Topic Selector - Output State Type: {type(state)}")
         logger.debug(f"Topic Selector - Output State Content: {state}")

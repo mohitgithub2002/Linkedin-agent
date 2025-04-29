@@ -5,6 +5,8 @@ from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
 from langgraph.graph import Graph, StateGraph
 import logging
+import re
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +31,8 @@ class BodyGeneratorAgent(BaseAgent):
             4. Maintain a professional and engaging tone
             
             Consider:
-            - The hook and its tone
+            - The hook and its tone to ensure smooth transition
+            - The topic and its context
             - Research data and insights
             - Target audience
             - Professional value
@@ -40,7 +43,7 @@ class BodyGeneratorAgent(BaseAgent):
                 "key_points": ["Key point 1", "Key point 2", ...],
                 "tone": "The tone used in the body"
             }}"""),
-            ("human", "Generate body content for a post about: {topic}\nHook: {hook}\nResearch: {research}")
+            ("human", "Generate body content for a post about: {topic}\nHook: {hook}\nResearch Context:\n{research}")
         ])
     
     async def run(self, state: AgentState) -> AgentState:
@@ -54,37 +57,65 @@ class BodyGeneratorAgent(BaseAgent):
             logger.debug(f"Converted State Type: {type(state)}")
             logger.debug(f"Converted State Content: {state}")
             
+        # Save initial checkpoint
+        self.save_checkpoint(state)
+            
+        # Validate input state
         if not state.current_topic:
-            logger.error("No topic found in state")
-            raise ValueError("No topic selected for body generation")
+            raise ValueError("No topic provided in state")
             
         if not state.hook_text:
-            logger.error("No hook found in state")
-            raise ValueError("No hook generated for body generation")
+            raise ValueError("No hook provided in state")
             
+        # Create prompt
         prompt = self.create_prompt()
         chain = prompt | self.llm | self.parser
         
-        # Get body text
-        research_context = "\n".join([f"{item['source']}: {item['snippet']}" 
-                                    for item in state.research_data])
-        result = await chain.ainvoke({
-            "topic": state.current_topic,
-            "hook": state.hook_text,
-            "research": research_context
-        })
-        logger.debug(f"Body Generation Result: {result}")
-        
-        # Convert result to BodyResult if it's a dictionary
-        if isinstance(result, dict):
-            result = BodyResult(**result)
-        
-        # Update state
-        state.body_text = result.body_text
-        state.messages.append({
-            "role": "assistant",
-            "content": f"Generated body content: {result.body_text}\nKey Points: {', '.join(result.key_points)}\nTone: {result.tone}"
-        })
+        try:
+            # Prepare research context
+            research_context = "\n".join([
+                f"{item['source']}: {item['snippet']}"
+                for item in state.research_data
+            ]) if state.research_data else "No research data available"
+            
+            # Invoke the chain
+            result = await chain.ainvoke({
+                "topic": state.current_topic,
+                "hook": state.hook_text,
+                "research": research_context
+            })
+            
+            # Handle markdown code blocks in the output
+            if isinstance(result, str):
+                # Remove markdown code block markers and any leading/trailing whitespace
+                result = re.sub(r'```json\n?|\n?```', '', result).strip()
+                try:
+                    # Parse the cleaned JSON
+                    result = json.loads(result)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse JSON: {e}")
+                    logger.error(f"Raw output: {result}")
+                    raise ValueError(f"Invalid JSON output: {str(e)}")
+            
+            # Convert result to BodyResult if it's a dictionary
+            if isinstance(result, dict):
+                result = BodyResult(**result)
+            elif not isinstance(result, BodyResult):
+                raise ValueError(f"Unexpected result type: {type(result)}")
+            
+            # Update state
+            state.body_text = result.body_text
+            state.messages.append({
+                "role": "assistant",
+                "content": f"Generated body text: {result.body_text}"
+            })
+            
+            # Save final checkpoint
+            self.save_checkpoint(state)
+            
+        except Exception as e:
+            logger.error(f"Error in BodyGeneratorAgent: {str(e)}")
+            raise
         
         logger.debug(f"Body Generator - Output State Type: {type(state)}")
         logger.debug(f"Body Generator - Output State Content: {state}")

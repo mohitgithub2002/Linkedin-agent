@@ -73,6 +73,9 @@ class ResearchAgent(BaseAgent):
             logger.debug(f"Converted State Type: {type(state)}")
             logger.debug(f"Converted State Content: {state}")
             
+        # Save initial checkpoint
+        self.save_checkpoint(state)
+            
         if not state.current_topic:
             logger.error("No topic found in state")
             raise ValueError("No topic selected for research")
@@ -99,6 +102,9 @@ class ResearchAgent(BaseAgent):
             "role": "assistant",
             "content": f"Research completed for topic: {state.current_topic}. Found {len(result.items)} items."
         })
+        
+        # Save final checkpoint
+        self.save_checkpoint(state)
         
         logger.debug(f"Research Agent - Output State Type: {type(state)}")
         logger.debug(f"Research Agent - Output State Content: {state}")

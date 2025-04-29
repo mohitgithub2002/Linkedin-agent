@@ -53,6 +53,9 @@ class CTAGeneratorAgent(BaseAgent):
             logger.debug(f"Converted State Type: {type(state)}")
             logger.debug(f"Converted State Content: {state}")
             
+        # Save initial checkpoint
+        self.save_checkpoint(state)
+            
         if not state.current_topic:
             logger.error("No topic found in state")
             raise ValueError("No topic selected for CTA generation")
@@ -81,6 +84,9 @@ class CTAGeneratorAgent(BaseAgent):
             "role": "assistant",
             "content": f"Generated CTA: {result.cta_text}\nAction Type: {result.action_type}\nUrgency Level: {result.urgency_level}"
         })
+        
+        # Save final checkpoint
+        self.save_checkpoint(state)
         
         logger.debug(f"CTA Generator - Output State Type: {type(state)}")
         logger.debug(f"CTA Generator - Output State Content: {state}")

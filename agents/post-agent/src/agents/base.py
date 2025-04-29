@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 import logging
+import json
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -30,6 +32,7 @@ class AgentState(BaseModel):
     qa_issues: List[str] = Field(default_factory=list, description="QA identified issues")
     post_payload: Optional[Dict[str, Any]] = Field(default=None, description="Final assembled post payload")
     image_url: Optional[str] = Field(default=None, description="URL for post image")
+    checkpoint_history: List[Dict[str, Any]] = Field(default_factory=list, description="History of checkpoints")
 
 class BaseAgent:
     """Base class for all agents in the system."""
@@ -89,3 +92,76 @@ class BaseAgent:
     def get_graph(self) -> Graph:
         """Get the agent's workflow graph."""
         raise NotImplementedError("Subclasses must implement get_graph method") 
+        
+    def save_checkpoint(self, state: AgentState) -> None:
+        """Save a checkpoint of the current state."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        checkpoint = {
+            "timestamp": timestamp,
+            "agent_name": self.name,
+            "topic": state.current_topic,
+            "state": {
+                "current_topic": state.current_topic,
+                "hook_text": state.hook_text,
+                "body_text": state.body_text,
+                "cta_text": state.cta_text,
+                "research_data": state.research_data,
+                "messages": state.messages,
+                "qa_feedback": state.qa_feedback,
+                "qa_suggestions": state.qa_suggestions,
+                "qa_score": state.qa_score,
+                "qa_issues": state.qa_issues,
+                "post_payload": state.post_payload,
+                "image_url": state.image_url
+            },
+            "input": {
+                "topic": state.current_topic,
+                "hook_text": state.hook_text,
+                "body_text": state.body_text,
+                "cta_text": state.cta_text,
+                "research_data": state.research_data
+            },
+            "output": {
+                "hook_text": state.hook_text,
+                "body_text": state.body_text,
+                "cta_text": state.cta_text,
+                "research_data": state.research_data,
+                "qa_feedback": state.qa_feedback,
+                "qa_suggestions": state.qa_suggestions,
+                "qa_score": state.qa_score,
+                "qa_issues": state.qa_issues
+            }
+        }
+        
+        # Get the run timestamp from the first checkpoint if it exists
+        run_timestamp = state.checkpoint_history[0]["timestamp"] if state.checkpoint_history else timestamp
+        
+        # Create directory if it doesn't exist
+        os.makedirs("testresult", exist_ok=True)
+        
+        # Update the state's checkpoint history
+        state.checkpoint_history.append(checkpoint)
+        
+        # Save all checkpoints to a single file
+        filename = f"testresult/history_{run_timestamp}.json"
+        
+        # Read existing checkpoints if file exists
+        existing_checkpoints = []
+        if os.path.exists(filename):
+            try:
+                with open(filename, 'r') as f:
+                    data = json.load(f)
+                    existing_checkpoints = data.get("checkpoints", [])
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to read existing checkpoints from {filename}")
+                existing_checkpoints = []
+        
+        # Combine existing and new checkpoints
+        all_checkpoints = existing_checkpoints + [checkpoint]
+        
+        # Save all checkpoints to the file
+        with open(filename, 'w') as f:
+            json.dump({
+                "run_timestamp": run_timestamp,
+                "checkpoints": all_checkpoints
+            }, f, indent=2)
