@@ -38,64 +38,115 @@ The constructor initializes the agent with:
 ### Prompt Creation
 
 ```python
-def create_prompt(self) -> ChatPromptTemplate:
-    return ChatPromptTemplate.from_messages([
-        ("system", """You are a professional LinkedIn content creator. Your task is to:
-        1. Create an engaging hook for a LinkedIn post
-        2. Ensure the hook captures attention and encourages reading
-        3. Match the tone and target audience of the post
-        
-        Consider:
-        - The main topic
-        - The target audience
-        - Current trends
-        - Professional tone
-        
-        Format your response as a JSON object with the following structure:
-        {{
-            "hook_text": "The engaging hook text",
-            "tone": "The tone used in the hook",
-            "target_audience": "The target audience for the hook"
-        }}"""),
-        ("human", "Generate a hook for a post about: {topic}")
+def create_prompt(self, identity_spec: Any) -> ChatPromptTemplate:
+    """Create a simplified prompt with no JSON structure in the system message."""
+    # Escape the hook templates
+    escaped_templates = str(identity_spec.hook_templates).replace("{", "{{").replace("}", "}}")
+    
+    # Convert complex objects to simple strings to avoid formatting issues
+    voice_str = str(identity_spec.voice).replace("{", "{{").replace("}", "}}")
+    pillars_str = str(identity_spec.pillars_ranked).replace("{", "{{").replace("}", "}}")
+    
+    # Create a very simple system message with no JSON example
+    system_message = f"""You are a professional LinkedIn content creator for {identity_spec.creator}. 
+
+Your task is to create an engaging hook for a LinkedIn post that:
+1. Aligns with the creator's brand identity
+2. Captures attention and encourages reading
+3. Matches appropriate tone and target audience
+4. Follows voice guidelines: {voice_str}
+5. Uses one of these templates: {escaped_templates}
+
+Consider these elements:
+- Creator's brand pillars: {pillars_str}
+- Creator's promise: {identity_spec.promise}
+
+Output a JSON with these fields:
+- hook_text: The engaging hook text as a string
+- tone: A SINGLE word or phrase describing the tone (e.g. "professional" or "conversational"), not a list
+- target_audience: The target audience for the hook as a string"""
+
+    # Create a completely separate human message template
+    human_message = "Generate a hook for a post about: {topic}"
+    
+    # Create template with simple parts
+    template = ChatPromptTemplate.from_messages([
+        ("system", system_message),
+        ("human", human_message)
     ])
+    
+    return template
 ```
 
 Creates a prompt for the agent that:
-- Establishes the role as a LinkedIn content creator
-- Defines what makes a good hook
-- Provides guidance on factors to consider
+- Establishes the role as a creator-specific LinkedIn content creator
+- Incorporates brand identity specifications from the identity agent
+- Provides the creator's voice guidelines, brand pillars, and promise
+- Uses the creator's approved hook templates
 - Specifies the output format
-- Provides a template for the human query
+- Properly escapes complex objects to avoid template formatting issues
 
 ### Run Method
 
 ```python
-async def run(self, state: AgentState) -> AgentState:
+async def run(self, state: IdentityAgentState) -> IdentityAgentState:
     logger.debug(f"Hook Generator - Input State Type: {type(state)}")
     logger.debug(f"Hook Generator - Input State Content: {state}")
     
-    # Convert state dictionary to AgentState if needed
+    # Convert state dictionary to IdentityAgentState if needed
     if isinstance(state, dict):
-        logger.info("Converting dictionary state to AgentState")
-        state = AgentState(**state)
-        logger.debug(f"Converted State Type: {type(state)}")
-        logger.debug(f"Converted State Content: {state}")
+        logger.info("Converting dictionary state to IdentityAgentState")
+        state = IdentityAgentState(**state)
+    
+    # Save initial checkpoint
+    self.save_checkpoint(state)
         
     if not state.current_topic:
         logger.error("No topic found in state")
         raise ValueError("No topic selected for hook generation")
         
-    prompt = self.create_prompt()
+    if not state.identity_spec:
+        logger.error("No identity spec found in state")
+        raise ValueError("Identity specification required for hook generation")
+        
+    # Create the prompt and chain
+    prompt = self.create_prompt(state.identity_spec)
     chain = prompt | self.llm | self.parser
     
-    # Get hook text
-    result = await chain.ainvoke({"topic": state.current_topic})
-    logger.debug(f"Hook Generation Result: {result}")
-    
-    # Convert result to HookResult if it's a dictionary
-    if isinstance(result, dict):
-        result = HookResult(**result)
+    # Get hook text with only the topic variable
+    try:
+        result = await chain.ainvoke({"topic": state.current_topic})
+        
+        # Handle case where tone might be a list instead of a string
+        if isinstance(result, dict) and "tone" in result and isinstance(result["tone"], list):
+            logger.warning(f"Tone returned as a list: {result['tone']}. Converting to string.")
+            result["tone"] = ", ".join(result["tone"])
+        
+        # Convert result to HookResult if it's a dictionary
+        if isinstance(result, dict):
+            result = HookResult(**result)
+        
+    except Exception as e:
+        logger.error(f"Error invoking hook generation chain: {str(e)}", exc_info=True)
+        raise ValueError(f"Failed to generate hook: {str(e)}")
+        
+    # Validate hook against identity rules
+    if state.validators and "hook" in state.validators:
+        is_valid, error_msg = state.validators["hook"](result.hook_text)
+        if not is_valid:
+            logger.warning(f"Hook validation failed: {error_msg}")
+            # Retry with more specific guidance
+            prompt = self.create_prompt(state.identity_spec)
+            chain = prompt | self.llm | self.parser
+            result = await chain.ainvoke({
+                "topic": state.current_topic,
+                "error": f"Previous hook failed validation: {error_msg}. Please try again."
+            })
+            if isinstance(result, dict):
+                # Handle case where tone might be a list instead of a string
+                if "tone" in result and isinstance(result["tone"], list):
+                    result["tone"] = ", ".join(result["tone"])
+                result = HookResult(**result)
     
     # Update state
     state.hook_text = result.hook_text
@@ -104,24 +155,27 @@ async def run(self, state: AgentState) -> AgentState:
         "content": f"Generated hook: {result.hook_text}\nTone: {result.tone}\nTarget Audience: {result.target_audience}"
     })
     
-    logger.debug(f"Hook Generator - Output State Type: {type(state)}")
-    logger.debug(f"Hook Generator - Output State Content: {state}")
+    # Save final checkpoint
+    self.save_checkpoint(state)
+    
     return state
 ```
 
 The run method:
-1. Validates the input state has a topic
-2. Creates the prompt and chain
+1. Validates the input state has a topic and identity specification
+2. Creates the prompt with the identity specification
 3. Invokes the LLM to generate a hook
-4. Parses the structured hook result
-5. Updates the state with the hook text and metadata
-6. Returns the updated state
+4. Handles potential format issues (like tone being returned as a list)
+5. Validates the hook against identity rules from the validators
+6. Retries hook generation with specific guidance if validation fails
+7. Updates the state with the hook text and metadata
+8. Returns the updated state
 
 ### Graph Method
 
 ```python
 def get_graph(self) -> Graph:
-    workflow = StateGraph(AgentState)
+    workflow = StateGraph(IdentityAgentState)
     workflow.add_node("generate_hook", self.run)
     workflow.set_entry_point("generate_hook")
     workflow.add_edge("generate_hook", "end")
@@ -132,32 +186,40 @@ Creates a simple LangGraph workflow with:
 - A single node for hook generation
 - An edge to the end
 - Entry point set to the hook generation node
+- Using IdentityAgentState for state management
 
 ## Functionality Flow
 
-1. **Input**: Receives a state with a selected topic (and possibly research data)
+1. **Input**: Receives a state with identity specifications, validators, and a selected topic
 2. **Processing**:
-   - Creates a prompt for hook generation based on the topic
+   - Creates a prompt for hook generation based on the identity spec and topic
    - Uses the LLM to generate an engaging hook
+   - Validates the hook against identity-specified templates
+   - Retries if the hook fails validation
    - Determines appropriate tone and target audience
-3. **Output**: Updates state with the hook text and additional metadata
+3. **Output**: Updates state with the validated hook text and additional metadata
 
-## Hook Characteristics
+## Hook Validation
 
-The Hook Generator creates hooks that:
-- Grab attention in the first few seconds
-- Create curiosity or interest
-- Establish relevance to the target audience
-- Set the tone for the rest of the post
-- Preview the value proposition of the content
-- Are concise and impactful
+The hook generator utilizes the identity agent's validators to ensure:
+1. The hook follows one of the approved hook templates
+2. The content aligns with the creator's brand voice
+3. The format meets established standards
+
+If validation fails, the agent:
+1. Logs the validation error
+2. Creates a new prompt with the specific validation error
+3. Attempts regeneration with more specific guidance
+4. Validates the new hook before finalizing
 
 ## Integration Points
 
 The Hook Generator Agent:
 - Receives input from the Research Agent
+- Uses identity specifications from the Identity Agent
+- Applies validation rules from the Identity Agent
 - Outputs to the Body Generator Agent
-- Updates the hook_text field in the AgentState
+- Updates the hook_text field in the IdentityAgentState
 
 ## Example Output
 

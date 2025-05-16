@@ -21,6 +21,7 @@ from typing import Dict, Any, Optional, List, TypedDict, Literal
 from langchain_core.language_models import BaseChatModel
 from langgraph.graph import StateGraph, END
 from .agents.base import AgentState, BaseAgent
+from .agents.identity_agent import IdentityAgent, IdentityAgentState
 from .agents.topic_selector import TopicSelectorAgent
 from .agents.research_agent import ResearchAgent
 from .agents.hook_generator import HookGeneratorAgent
@@ -41,7 +42,7 @@ import uuid
 
 The file begins by importing necessary modules:
 - LangChain/LangGraph components
-- Agent classes
+- Agent classes (including IdentityAgent and IdentityAgentState)
 - Utility libraries
 - LangSmith tracing components
 
@@ -140,7 +141,7 @@ def create_workflow(llm: Optional[BaseChatModel] = None) -> StateGraph:
         if not api_key:
             raise ValueError("GOOGLE_API_KEY not found in environment variables")
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash",
+            model="gemini-2.0-flash-lite",
             google_api_key=api_key,
             temperature=0.7,
             top_p=0.8,
@@ -149,6 +150,9 @@ def create_workflow(llm: Optional[BaseChatModel] = None) -> StateGraph:
         logger.info("Initialized default LLM")
     
     # Initialize agents
+    identity_agent = IdentityAgent()
+    identity_agent.set_llm(llm)
+    
     topic_selector = TopicSelectorAgent()
     topic_selector.set_llm(llm)
     
@@ -175,14 +179,16 @@ def create_workflow(llm: Optional[BaseChatModel] = None) -> StateGraph:
 
 This function:
 1. Initializes the Google Gemini LLM if not provided
-2. Creates instances of all specialized agents
-3. Configures each agent with the LLM
+2. Creates an instance of the IdentityAgent (now the first agent in the sequence)
+3. Creates instances of all other specialized agents
+4. Configures each agent with the LLM
 
 ```python
     # Define the workflow
-    workflow = StateGraph(AgentState)
+    workflow = StateGraph(IdentityAgentState)
     
     # Add nodes
+    workflow.add_node("identity", identity_agent.run)
     workflow.add_node("select_topic", topic_selector.run)
     workflow.add_node("research", researcher.run)
     workflow.add_node("generate_hook", hook_generator.run)
@@ -194,6 +200,7 @@ This function:
     logger.info("Added all nodes to workflow graph")
     
     # Define edges
+    workflow.add_edge("identity", "select_topic")
     workflow.add_edge("select_topic", "research")
     workflow.add_edge("research", "generate_hook")
     workflow.add_edge("generate_hook", "generate_body")
@@ -205,8 +212,8 @@ This function:
     logger.info("Added all edges to workflow graph")
     
     # Set entry point
-    workflow.set_entry_point("select_topic")
-    logger.info("Set entry point to 'select_topic'")
+    workflow.set_entry_point("identity")
+    logger.info("Set entry point to 'identity'")
     
     # Compile the workflow
     compiled_workflow = workflow.compile()
@@ -216,11 +223,12 @@ This function:
 ```
 
 This part of the function defines the LangGraph workflow:
-1. Creates a StateGraph with the AgentState model
-2. Adds each agent as a node in the graph
-3. Defines the linear sequence of execution with directed edges
-4. Sets the topic selector as the entry point
-5. Compiles the workflow for execution
+1. Creates a StateGraph with the IdentityAgentState model (not AgentState)
+2. Adds the identity agent as the first node in the graph
+3. Adds each other agent as a node in the graph
+4. Defines the linear sequence of execution with directed edges
+5. Sets the identity agent as the entry point (instead of topic selector)
+6. Compiles the workflow for execution
 
 ### Post Generation Function
 
@@ -234,7 +242,7 @@ async def generate_post(topic: Optional[str] = None) -> Dict[str, Any]:
         workflow = create_workflow()
         
         # Create initial state
-        initial_state = AgentState()
+        initial_state = IdentityAgentState()
         if topic:
             initial_state.current_topic = topic
             logger.info(f"Initialized state with topic: {topic}")
@@ -242,7 +250,8 @@ async def generate_post(topic: Optional[str] = None) -> Dict[str, Any]:
 
 The main function to generate a post:
 1. Initializes the workflow
-2. Creates the initial state with an optional topic
+2. Creates the initial state as IdentityAgentState (instead of AgentState)
+3. Populates the state with an optional topic
 
 ```python
         # Setup config for tracing
@@ -345,13 +354,14 @@ Handles workflow results and clean-up:
 The workflow execution follows this sequence:
 
 1. **Initialization**: Create the StateGraph and initialize agents
-2. **Topic Selection**: Choose or refine a topic through TopicSelectorAgent
-3. **Research**: Gather relevant information through ResearchAgent
-4. **Content Generation**: Create hook, body, and CTA sequentially
-5. **Quality Assurance**: Assess the post quality through QAAgent
-6. **Final Assembly**: Combine all components through FinalAssemblerAgent
-7. **Result Validation**: Ensure the post_payload exists in the final state
-8. **Return**: Provide the final post payload to the caller
+2. **Identity Loading**: Load brand identity specifications through IdentityAgent
+3. **Topic Selection**: Choose or refine a topic through TopicSelectorAgent
+4. **Research**: Gather relevant information through ResearchAgent
+5. **Content Generation**: Create hook, body, and CTA sequentially
+6. **Quality Assurance**: Assess the post quality through QAAgent
+7. **Final Assembly**: Combine all components through FinalAssemblerAgent
+8. **Result Validation**: Ensure the post_payload exists in the final state
+9. **Return**: Provide the final post payload to the caller
 
 ## Error Handling
 

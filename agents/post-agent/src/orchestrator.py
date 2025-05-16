@@ -9,6 +9,7 @@ from .agents.body_generator import BodyGeneratorAgent
 from .agents.cta_generator import CTAGeneratorAgent
 from .agents.qa_agent import QAAgent
 from .agents.final_assembler import FinalAssemblerAgent
+from .agents.identity_agent import IdentityAgent, IdentityAgentState
 from langchain_google_genai import ChatGoogleGenerativeAI
 import os
 from dotenv import load_dotenv
@@ -98,6 +99,9 @@ def create_workflow(llm: Optional[BaseChatModel] = None) -> StateGraph:
         logger.info("Initialized default LLM")
     
     # Initialize agents
+    identity_agent = IdentityAgent()
+    identity_agent.set_llm(llm)
+    
     topic_selector = TopicSelectorAgent()
     topic_selector.set_llm(llm)
     
@@ -122,9 +126,10 @@ def create_workflow(llm: Optional[BaseChatModel] = None) -> StateGraph:
     logger.info("All agents initialized with LLM")
     
     # Define the workflow
-    workflow = StateGraph(AgentState)
+    workflow = StateGraph(IdentityAgentState)
     
     # Add nodes
+    workflow.add_node("identity", identity_agent.run)
     workflow.add_node("select_topic", topic_selector.run)
     workflow.add_node("research", researcher.run)
     workflow.add_node("generate_hook", hook_generator.run)
@@ -136,6 +141,7 @@ def create_workflow(llm: Optional[BaseChatModel] = None) -> StateGraph:
     logger.info("Added all nodes to workflow graph")
     
     # Define edges
+    workflow.add_edge("identity", "select_topic")
     workflow.add_edge("select_topic", "research")
     workflow.add_edge("research", "generate_hook")
     workflow.add_edge("generate_hook", "generate_body")
@@ -147,8 +153,8 @@ def create_workflow(llm: Optional[BaseChatModel] = None) -> StateGraph:
     logger.info("Added all edges to workflow graph")
     
     # Set entry point
-    workflow.set_entry_point("select_topic")
-    logger.info("Set entry point to 'select_topic'")
+    workflow.set_entry_point("identity")
+    logger.info("Set entry point to 'identity'")
     
     # Compile the workflow
     compiled_workflow = workflow.compile()
@@ -165,7 +171,7 @@ async def generate_post(topic: Optional[str] = None) -> Dict[str, Any]:
         workflow = create_workflow()
         
         # Create initial state
-        initial_state = AgentState()
+        initial_state = IdentityAgentState()
         if topic:
             initial_state.current_topic = topic
             logger.info(f"Initialized state with topic: {topic}")
